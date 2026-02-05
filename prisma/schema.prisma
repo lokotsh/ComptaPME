@@ -1,0 +1,898 @@
+// Logiciel Comptable PME - Schéma Prisma
+// Multi-tenant ready avec isolation par companyId
+
+generator client {
+  provider = "prisma-client-js"
+  engineType = "library"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// ENTREPRISE & AUTHENTIFICATION
+// ============================================
+
+model Company {
+  id              String   @id @default(uuid())
+  name            String
+  rccm            String?  // Registre de Commerce
+  ifu             String?  // Identifiant Fiscal Unique
+  address         String?
+  phone           String?
+  email           String?
+  website         String?
+  logo            String?
+  currency        String   @default("XOF")
+  taxRegime       String?  // Régime fiscal
+  fiscalYearStart Int      @default(1) // Mois de début exercice
+  cnssRate        Float    @default(19.4) // Taux CNSS total
+  cnssEmployerRate Float   @default(15.4) // Part patronale
+  cnssEmployeeRate Float   @default(4.0)  // Part salariale
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  users           User[]
+  fiscalYears     FiscalYear[]
+  accounts        Account[]
+  clients         Client[]
+  suppliers       Supplier[]
+  invoices        Invoice[]
+  supplierInvoices SupplierInvoice[]
+  bankAccounts    BankAccount[]
+  employees       Employee[]
+  payrollRuns     PayrollRun[]
+  tvaDeclarations TvaDeclaration[]
+  documents       Document[]
+  auditLogs       AuditLog[]
+  notifications   Notification[]
+  settings        CompanySettings?
+}
+
+model User {
+  id            String    @id @default(uuid())
+  companyId     String
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  email         String    @unique
+  name          String
+  passwordHash  String
+  role          String    @default("CASHIER")
+  isActive      Boolean   @default(true)
+  twoFactorEnabled Boolean @default(false)
+  twoFactorSecret String?
+  lastLogin     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  sessions      Session[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+  createdInvoices Invoice[] @relation("InvoiceCreatedBy")
+  payrollRuns   PayrollRun[] @relation("PayrollCreatedBy")
+
+  @@index([companyId])
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token        String   @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+}
+
+// enum UserRole {
+//   ADMIN       // Propriétaire / Gérant
+//   ACCOUNTANT  // Comptable externe
+//   HR_MANAGER  // Responsable RH
+//   CASHIER     // Caissier / Opérateur
+//   READ_ONLY   // Lecture seule
+// }
+
+// ============================================
+// COMPTABILITÉ - PLAN COMPTABLE
+// ============================================
+
+model FiscalYear {
+  id          String   @id @default(uuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name        String   // Ex: "2026"
+  startDate   DateTime
+  endDate     DateTime
+  isClosed    Boolean  @default(false)
+  closedAt    DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  journalEntries JournalEntry[]
+
+  @@index([companyId])
+}
+
+model Account {
+  id          String      @id @default(uuid())
+  companyId   String
+  company     Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  code        String      // Code comptable (ex: 411000)
+  label       String      // Libellé du compte
+  type        String
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  // Relations
+  journalLines  JournalLine[]
+  invoiceLines  InvoiceLine[]
+  supplierInvoiceLines SupplierInvoiceLine[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+// enum AccountType {
+//   ASSET       // Actif
+//   LIABILITY   // Passif
+//   EQUITY      // Capitaux propres
+//   REVENUE     // Produits
+//   EXPENSE     // Charges
+// }
+
+model JournalEntry {
+  id            String     @id @default(uuid())
+  fiscalYearId  String
+  fiscalYear    FiscalYear @relation(fields: [fiscalYearId], references: [id])
+  entryDate     DateTime
+  reference     String?    // Référence pièce
+  description   String
+  journalType   String @default("GENERAL")
+  isValidated   Boolean    @default(false)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  // Relations
+  lines         JournalLine[]
+
+  @@index([fiscalYearId])
+  @@index([entryDate])
+}
+
+model JournalLine {
+  id          String       @id @default(uuid())
+  entryId     String
+  entry       JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  accountId   String
+  account     Account      @relation(fields: [accountId], references: [id])
+  debit       Decimal      @default(0)
+  credit      Decimal      @default(0)
+  label       String?
+
+  @@index([entryId])
+  @@index([accountId])
+}
+
+// enum JournalType {
+//   GENERAL     // Journal général
+//   SALES       // Journal des ventes
+//   PURCHASES   // Journal des achats
+//   BANK        // Journal de banque
+//   CASH        // Journal de caisse
+//   PAYROLL     // Journal de paie
+//   OD          // Opérations diverses
+// }
+
+// ============================================
+// VENTES - CLIENTS & FACTURES
+// ============================================
+
+model Client {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name            String
+  ifu             String?  // Identifiant fiscal
+  rccm            String?
+  address         String?
+  phone           String?
+  email           String?
+  contact         String?  // Personne de contact
+  paymentTermDays Int      @default(30) // Délai de paiement
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  invoices        Invoice[]
+
+  @@index([companyId])
+}
+
+model Invoice {
+  id              String        @id @default(uuid())
+  companyId       String
+  company         Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  clientId        String
+  client          Client        @relation(fields: [clientId], references: [id])
+  createdById     String
+  createdBy       User          @relation("InvoiceCreatedBy", fields: [createdById], references: [id])
+  
+  number          String        // Numéro facture unique
+  series          String        @default("FAC") // Série (FAC, AVO, etc.)
+  type            String   @default("INVOICE")
+  issueDate       DateTime
+  dueDate         DateTime
+  
+  // Montants
+  totalHT         Decimal
+  totalTVA        Decimal
+  totalTTC        Decimal
+  amountPaid      Decimal       @default(0)
+  
+  status          String @default("DRAFT")
+  notes           String?
+  legalMentions   String?
+  
+  // MECeF (Facturation Normalisée Bénin)
+  mecefNim        String?       // Numéro d'Identification de la Machine
+  mecefCounters   String?       // Compteurs (ex: 124/2000)
+  mecefDtc        String?       // Date et Heure Certification
+  mecefQrCode     String?       // Données QR Code
+  mecefSignature  String?       // Signature électronique
+  mecefType       String   @default("FV") // FV (Vente), FA (Avoir), etc.
+  mecefStatus     String   @default("PENDING") // PENDING, CERTIFIED, ERROR
+  
+  // Avoirs
+  originalInvoiceId String?    // ID de la facture d'origine (si Avoir)
+  originalInvoice   Invoice?   @relation("InvoiceCreditNotes", fields: [originalInvoiceId], references: [id])
+  creditNotes       Invoice[]  @relation("InvoiceCreditNotes")
+
+
+  pdfPath         String?
+  sentAt          DateTime?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // Relations
+  lines           InvoiceLine[]
+  payments        Payment[]
+  documents       Document[]
+
+  @@unique([companyId, number])
+  @@index([companyId])
+  @@index([clientId])
+  @@index([status])
+  @@index([issueDate])
+}
+
+model InvoiceLine {
+  id              String   @id @default(uuid())
+  invoiceId       String
+  invoice         Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  accountId       String?
+  account         Account? @relation(fields: [accountId], references: [id])
+  
+  description     String
+  quantity        Decimal
+  unitPriceHT     Decimal
+  tvaRate         Decimal
+  tvaGroup        String   @default("B") // A, B, C, D, E, F
+  discountPercent Decimal  @default(0)
+  totalHT         Decimal
+  totalTVA        Decimal
+  totalTTC        Decimal
+  
+  position        Int      @default(0)
+
+  @@index([invoiceId])
+}
+
+model Payment {
+  id              String        @id @default(uuid())
+  invoiceId       String
+  invoice         Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  
+  amount          Decimal
+  paymentDate     DateTime
+  paymentMethod   String
+  reference       String?       // Référence paiement
+  notes           String?
+  
+  createdAt       DateTime      @default(now())
+
+  @@index([invoiceId])
+}
+
+// enum InvoiceType {
+//   QUOTE       // Devis
+//   ORDER       // Commande
+//   INVOICE     // Facture
+//   CREDIT_NOTE // Avoir
+// }
+
+// enum InvoiceStatus {
+//   DRAFT           // Brouillon
+//   SENT            // Émise/Envoyée
+//   PARTIALLY_PAID  // Partiellement payée
+//   PAID            // Payée
+//   OVERDUE         // En retard
+//   CANCELLED       // Annulée
+// }
+
+// enum PaymentMethod {
+//   CASH            // Espèces
+//   BANK_TRANSFER   // Virement
+//   CHECK           // Chèque
+//   MOBILE_MONEY    // Mobile Money
+//   CARD            // Carte bancaire
+//   OTHER           // Autre
+// }
+
+// ============================================
+// ACHATS - FOURNISSEURS
+// ============================================
+
+model Supplier {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name            String
+  ifu             String?
+  rccm            String?
+  address         String?
+  phone           String?
+  email           String?
+  contact         String?
+  paymentTermDays Int      @default(30)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  invoices        SupplierInvoice[]
+
+  @@index([companyId])
+}
+
+model SupplierInvoice {
+  id              String              @id @default(uuid())
+  companyId       String
+  company         Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  supplierId      String
+  supplier        Supplier            @relation(fields: [supplierId], references: [id])
+  
+  number          String              // Numéro facture fournisseur
+  issueDate       DateTime
+  dueDate         DateTime
+  receiptDate     DateTime            // Date de réception
+  
+  totalHT         Decimal
+  totalTVA        Decimal
+  totalTTC        Decimal
+  amountPaid      Decimal             @default(0)
+  
+  status          String @default("PENDING")
+  tvaDeductible   Boolean             @default(true)
+  notes           String?
+  
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  // Relations
+  lines           SupplierInvoiceLine[]
+  payments        SupplierPayment[]
+  documents       Document[]
+
+  @@index([companyId])
+  @@index([supplierId])
+}
+
+model SupplierInvoiceLine {
+  id              String          @id @default(uuid())
+  invoiceId       String
+  invoice         SupplierInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  accountId       String?
+  account         Account?        @relation(fields: [accountId], references: [id])
+  
+  description     String
+  quantity        Decimal
+  unitPriceHT     Decimal
+  tvaRate         Decimal
+  totalHT         Decimal
+  totalTVA        Decimal
+  totalTTC        Decimal
+  
+  position        Int             @default(0)
+
+  @@index([invoiceId])
+}
+
+model SupplierPayment {
+  id              String          @id @default(uuid())
+  invoiceId       String
+  invoice         SupplierInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  
+  amount          Decimal
+  paymentDate     DateTime
+  paymentMethod   String
+  bankAccountId   String?
+  reference       String?
+  notes           String?
+  
+  createdAt       DateTime        @default(now())
+
+  @@index([invoiceId])
+}
+
+// enum SupplierInvoiceStatus {
+//   PENDING         // En attente
+//   APPROVED        // Validée
+//   PARTIALLY_PAID  // Partiellement payée
+//   PAID            // Payée
+//   CANCELLED       // Annulée
+// }
+
+// ============================================
+// BANQUE & RAPPROCHEMENT
+// ============================================
+
+model BankAccount {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  name            String   // Nom du compte
+  bankName        String
+  accountNumber   String?
+  iban            String?
+  bic             String?
+  currency        String   @default("XOF")
+  initialBalance  Decimal  @default(0)
+  currentBalance  Decimal  @default(0)
+  isActive        Boolean  @default(true)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  transactions    BankTransaction[]
+  reconciliations BankReconciliation[]
+
+  @@index([companyId])
+}
+
+model BankTransaction {
+  id              String       @id @default(uuid())
+  bankAccountId   String
+  bankAccount     BankAccount  @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+  
+  transactionDate DateTime
+  valueDate       DateTime?
+  amount          Decimal      // Positif = crédit, Négatif = débit
+  label           String
+  reference       String?
+  
+  // Rapprochement
+  isReconciled    Boolean      @default(false)
+  reconciledAt    DateTime?
+  matchedInvoiceId String?     // ID facture client ou fournisseur
+  matchedType     String?      // "client" ou "supplier"
+  
+  // Import
+  importedAt      DateTime?
+  importHash      String?      // Pour éviter les doublons
+  
+  assignedAccountId String?    // Compte suggéré par les règles automatiques
+  
+  createdAt       DateTime     @default(now())
+
+  @@index([bankAccountId])
+  @@index([transactionDate])
+  @@index([isReconciled])
+}
+
+model BankReconciliation {
+  id              String      @id @default(uuid())
+  bankAccountId   String
+  bankAccount     BankAccount @relation(fields: [bankAccountId], references: [id])
+  
+  periodStart     DateTime
+  periodEnd       DateTime
+  statementBalance Decimal
+  computedBalance Decimal
+  difference      Decimal
+  isBalanced      Boolean     @default(false)
+  
+  createdAt       DateTime    @default(now())
+  validatedAt     DateTime?
+
+  @@index([bankAccountId])
+}
+
+model BankMatchingRule {
+  id              String   @id @default(uuid())
+  companyId       String
+  
+  name            String
+  labelContains   String?  // Si le libellé contient
+  amountEquals    Decimal?
+  amountMin       Decimal?
+  amountMax       Decimal?
+  
+  // Action
+  assignAccountId String?
+  autoReconcile   Boolean  @default(false)
+  
+  isActive        Boolean  @default(true)
+  priority        Int      @default(0)
+  
+  createdAt       DateTime @default(now())
+
+  @@index([companyId])
+}
+
+// ============================================
+// PAIE & RH
+// ============================================
+
+model Employee {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Identité
+  firstName       String
+  lastName        String
+  dateOfBirth     DateTime?
+  placeOfBirth    String?
+  nationality     String?
+  gender          String?
+  
+  // Contact
+  address         String?
+  phone           String?
+  email           String?
+  
+  // Administratif
+  cnssNumber      String?  // Numéro CNSS
+  ifu             String?
+  idNumber        String?  // Numéro pièce d'identité
+  idType          String?  // Type pièce
+  
+  // Contrat
+  hireDate        DateTime
+  endDate         DateTime?
+  contractType    String @default("CDI")
+  position        String       // Poste
+  department      String?
+  
+  // Salaire
+  baseSalary      Decimal
+  paymentMethod   String @default("BANK_TRANSFER")
+  bankName        String?
+  bankAccountNumber String?
+  
+  // Statut
+  isActive        Boolean      @default(true)
+  
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  // Relations
+  payslips        Payslip[]
+  leaveBalances   LeaveBalance[]
+  documents       Document[]
+
+  @@index([companyId])
+}
+
+// enum ContractType {
+//   CDI             // Contrat à durée indéterminée
+//   CDD             // Contrat à durée déterminée
+//   STAGE           // Stage
+//   INTERIM         // Intérim
+//   CONSULTANT      // Consultant
+// }
+
+model PayrollRun {
+  id              String       @id @default(uuid())
+  companyId       String
+  company         Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdById     String
+  createdBy       User         @relation("PayrollCreatedBy", fields: [createdById], references: [id])
+  
+  periodStart     DateTime     // Début période (1er du mois)
+  periodEnd       DateTime     // Fin période
+  paymentDate     DateTime     // Date de paiement prévue
+  
+  // Totaux
+  totalGross      Decimal
+  totalNetPay     Decimal
+  totalEmployerCharges Decimal
+  totalEmployeeDeductions Decimal
+  totalCNSS       Decimal
+  totalIR         Decimal
+  
+  status          String @default("DRAFT")
+  validatedAt     DateTime?
+  paidAt          DateTime?
+  
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  // Relations
+  payslips        Payslip[]
+
+  @@index([companyId])
+  @@index([periodStart])
+}
+
+model Payslip {
+  id              String     @id @default(uuid())
+  payrollRunId    String
+  payrollRun      PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  employeeId      String
+  employee        Employee   @relation(fields: [employeeId], references: [id])
+  
+  // Salaire brut
+  baseSalary      Decimal
+  bonuses         Decimal    @default(0)
+  overtime        Decimal    @default(0)
+  otherEarnings   Decimal    @default(0)
+  grossSalary     Decimal
+  
+  // Cotisations salariales
+  cnssEmployee    Decimal
+  irRetained      Decimal // IR retenu à la source
+  otherDeductions Decimal    @default(0)
+  totalDeductions Decimal
+  
+  // Charges patronales
+  cnssEmployer    Decimal
+  otherEmployerCharges Decimal @default(0)
+  totalEmployerCharges Decimal
+  
+  // Net
+  netSalary       Decimal
+  
+  pdfPath         String?
+  
+  createdAt       DateTime   @default(now())
+
+  @@index([payrollRunId])
+  @@index([employeeId])
+}
+
+model LeaveBalance {
+  id              String   @id @default(uuid())
+  employeeId      String
+  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  
+  year            Int
+  leaveType       String   @default("ANNUAL") // ANNUAL, SICK, etc.
+  entitled        Decimal // Jours acquis
+  taken           Decimal  @default(0)
+  remaining       Decimal
+  
+  @@unique([employeeId, year, leaveType])
+}
+
+// enum PayrollStatus {
+//   DRAFT           // Brouillon
+//   CALCULATED      // Calculée
+//   VALIDATED       // Validée
+//   PAID            // Payée
+//   CANCELLED       // Annulée
+// }
+
+// ============================================
+// TVA & FISCALITÉ
+// ============================================
+
+model TvaDeclaration {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  periodStart     DateTime
+  periodEnd       DateTime
+  
+  // Ventes
+  salesHT         Decimal
+  salesTVA        Decimal // TVA collectée
+  
+  // Achats
+  purchasesHT     Decimal
+  purchasesTVA    Decimal // TVA déductible
+  
+  // Résultat
+  tvaCollected    Decimal
+  tvaDeductible   Decimal
+  tvaDue          Decimal // À payer ou crédit
+  previousCredit  Decimal  @default(0)
+  
+  status          String @default("DRAFT")
+  dueDate         DateTime?
+  submittedAt     DateTime?
+  paidAt          DateTime?
+  pdfPath         String?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([companyId])
+  @@index([periodStart])
+}
+
+model TaxCalendar {
+  id              String   @id @default(uuid())
+  companyId       String
+  
+  taxType         String   // TVA, CNSS, IR, IS, etc.
+  description     String
+  dueDate         DateTime
+  amount          Decimal?
+  status          String   @default("PENDING") // PENDING, PAID, OVERDUE
+  paidAt          DateTime?
+  reference       String?
+  
+  createdAt       DateTime @default(now())
+
+  @@index([companyId])
+  @@index([dueDate])
+}
+
+// enum DeclarationStatus {
+//   DRAFT           // Brouillon
+//   READY           // Prête
+//   SUBMITTED       // Soumise
+//   PAID            // Payée
+// }
+
+// ============================================
+// DOCUMENTS & PIÈCES JOINTES
+// ============================================
+
+model Document {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Type de référence
+  refType         String   // invoice, supplier_invoice, employee, etc.
+  refId           String   // ID de l'objet lié
+  
+  fileName        String
+  originalName    String
+  mimeType        String
+  size            Int      // Taille en bytes
+  path            String   // Chemin de stockage
+  hash            String?  // Hash pour intégrité
+  
+  createdAt       DateTime @default(now())
+
+  // Relations optionnelles
+  invoice         Invoice?         @relation(fields: [invoiceId], references: [id])
+  invoiceId       String?
+  supplierInvoice SupplierInvoice? @relation(fields: [supplierInvoiceId], references: [id])
+  supplierInvoiceId String?
+  employee        Employee?        @relation(fields: [employeeId], references: [id])
+  employeeId      String?
+
+  @@index([companyId])
+  @@index([refType, refId])
+}
+
+// ============================================
+// AUDIT & LOGS
+// ============================================
+
+model AuditLog {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId          String?
+  user            User?    @relation(fields: [userId], references: [id])
+  
+  action          String   // CREATE, UPDATE, DELETE, LOGIN, etc.
+  entityType      String   // Invoice, Payment, Employee, etc.
+  entityId        String?
+  oldValues       String?    // Anciennes valeurs (pour UPDATE) (Was Json)
+  newValues       String?    // Nouvelles valeurs (Was Json)
+  ipAddress       String?
+  userAgent       String?
+  
+  createdAt       DateTime @default(now())
+
+  @@index([companyId])
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// ============================================
+// PARAMÈTRES
+// ============================================
+
+model CompanySettings {
+  id              String   @id @default(uuid())
+  companyId       String   @unique
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Fiscalité
+  taxSystem       String    @default("REEL") // Was TaxSystem
+  tvaEnabled      Boolean   @default(true)
+
+  isMicroEnterprise Boolean @default(false)
+  
+  // MECeF Configuration
+  mecefEnabled    Boolean   @default(false)
+  mecefUid        String?   // UID fourni par la DGI (facultatif si simulation)
+  mecefApiToken   String?   // Token API
+  mecefEnv        String    @default("TEST") // PROD, TEST, SIMULATION
+  
+  // TVA
+  defaultTvaRate  Decimal  @default(18)
+  tvaRates        String   @default("[0, 5, 18]") // Taux disponibles (Was Json)
+
+  // Facturation
+  invoicePrefix   String   @default("FAC")
+  invoiceNextNumber Int    @default(1)
+  quotePrefix     String   @default("DEV")
+  quoteNextNumber Int      @default(1)
+  defaultPaymentTerm Int    @default(30)
+  invoiceFooter   String?   // Mentions légales bas de page
+  legalMentions   String?
+  
+  // Paie (Taux Bénin)
+  cnssEmployerRate Decimal  @default(15.4)
+  cnssEmployeeRate Decimal  @default(3.6)
+  irBrackets      String?    // Barème IR (Was Json)
+  
+  // Notifications
+  emailNotifications Boolean @default(true)
+  dueDateReminder Int       @default(7) // Jours avant échéance
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// enum TaxSystem {
+//   TPS             // Taxe Professionnelle Synthétique (Micro/Petites entreprises)
+//   REEL            // Régime du Réel (TVA + IS/IBA)
+// }
+
+model Notification {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId          String?  // Si null, pour toute l'entreprise (admin)
+  user            User?    @relation(fields: [userId], references: [id])
+  
+  title           String
+  message         String
+  type            String   @default("INFO") // Was NotificationType
+  isRead          Boolean  @default(false)
+  link            String?  // Lien de redirection
+  
+  createdAt       DateTime @default(now())
+
+  @@index([companyId])
+  @@index([userId])
+  @@index([isRead])
+}
+
+// enum NotificationType {
+//   INFO
+//   WARNING
+//   SUCCESS
+//   ERROR
+// }
