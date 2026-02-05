@@ -1,10 +1,9 @@
-# ComptaPME - Logiciel de Comptabilité SaaS
+# Compta App (Déploiement Vercel/Supabase)PME - Logiciel de Comptabilité SaaS
 
 ComptaPME est une solution de comptabilité moderne et intuitive conçue spécifiquement pour les Petites et Moyennes Entreprises (PME) en Afrique (zone OHADA). Elle simplifie la facturation, la gestion des dépenses, la paie, et la fiscalité.
 
 ## 🚀 Fonctionnalités Principales
 
-* **Tableau de Bord** : Vue d'ensemble de la santé financière.
 * **Ventes & Facturation** : Devis, Factures, Clients, Suivi des paiements.
 * **Achats & Dépenses** : Factures fournisseurs, gestion des échéances.
 * **Banque** : Import de relevés, rapprochement bancaire intelligent.
